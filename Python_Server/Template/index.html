@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Face Attendance</title>
+  <style>
+    :root {
+      --bg: #f5f4ef;
+      --card: #ffffff;
+      --line: #d8d7d1;
+      --ink: #182128;
+      --accent: #0e7490;
+      --good: #166534;
+      --muted: #5b6470;
+    }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", sans-serif;
+      background: linear-gradient(180deg, #f8f6f1 0%, var(--bg) 100%);
+      color: var(--ink);
+    }
+    .wrap {
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 18px;
+    }
+    h1, h2 {
+      margin-top: 0;
+    }
+    .actions, .row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+    button, input {
+      font: inherit;
+      padding: 11px 14px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+    }
+    button {
+      background: var(--accent);
+      color: white;
+      cursor: pointer;
+    }
+    input {
+      background: #fff;
+      min-width: 220px;
+    }
+    video, canvas {
+      width: 100%;
+      min-height: 300px;
+      object-fit: cover;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: #eceae2;
+    }
+    canvas {
+      display: none;
+    }
+    .meta, .list {
+      display: grid;
+      gap: 8px;
+      color: var(--muted);
+    }
+    .pill {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: #ecfeff;
+      color: #155e75;
+      margin-bottom: 12px;
+    }
+    .ok {
+      color: var(--good);
+      font-weight: 600;
+    }
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      background: #f7f6f2;
+      padding: 12px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      max-height: 260px;
+      overflow: auto;
+    }
+    @media (max-width: 900px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Face Attendance</h1>
+    <div class="grid">
+      <section class="card">
+        <div class="pill">Register Face</div>
+        <div class="row">
+          <button onclick="startCamera()">Start Camera</button>
+          <button onclick="stopCamera()">Stop Camera</button>
+        </div>
+        <div class="row">
+          <input id="personName" placeholder="Enter name">
+          <button onclick="registerFace()">Register Face</button>
+        </div>
+        <div class="meta" id="registerMeta"></div>
+      </section>
+
+      <section class="card">
+        <div class="pill">Detection</div>
+        <div class="row">
+          <button onclick="connectEsp()">Connect ESP</button>
+          <button onclick="testEsp()">Test ESP</button>
+        </div>
+        <div class="row">
+          <button onclick="startDetection()">Start Detection</button>
+          <button onclick="stopDetection()">Stop Detection</button>
+        </div>
+        <div class="row">
+          <button onclick="testHardware('relay')">Test Relay</button>
+          <button onclick="testHardware('buzzer')">Test Buzzer</button>
+          <button onclick="testHardware('green')">Test Green LED</button>
+          <button onclick="testHardware('red')">Test Red LED</button>
+          <button onclick="testHardware('pir')">Test IR</button>
+        </div>
+        <div class="meta" id="detectMeta"></div>
+      </section>
+    </div>
+
+    <div class="grid" style="margin-top: 18px;">
+      <section class="card">
+        <h2>Client Camera Preview</h2>
+        <video id="video" autoplay playsinline muted></video>
+        <canvas id="canvas"></canvas>
+      </section>
+
+      <section class="card">
+        <h2>Attendance Log</h2>
+        <div class="list" id="attendanceList">No attendance yet.</div>
+      </section>
+    </div>
+
+    <section class="card" style="margin-top: 18px;">
+      <h2>System Log</h2>
+      <pre id="systemLog">Loading...</pre>
+    </section>
+  </div>
+
+  <script>
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    let mediaStream = null;
+    let statusTimer = null;
+    let lastHandledMotionSequence = 0;
+
+    async function postJson(url, body = null) {
+      const options = { method: 'POST', headers: {} };
+      if (body !== null) {
+        options.headers['Content-Type'] = 'application/json';
+        options.body = JSON.stringify(body);
+      }
+      const res = await fetch(url, options);
+      let data = {};
+      try {
+        data = await res.json();
+      } catch {
+        data = { ok: res.ok, error: 'Invalid server response' };
+      }
+      if (!res.ok || data.ok === false) {
+        throw new Error(data.error || `Request failed: ${res.status}`);
+      }
+      return data;
+    }
+
+    function captureFrame() {
+      if (!video.videoWidth || !video.videoHeight) {
+        return null;
+      }
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      return canvas.toDataURL('image/jpeg', 0.85);
+    }
+
+    async function fetchStatus() {
+      const res = await fetch('/api/status');
+      const data = await res.json();
+
+      document.getElementById('registerMeta').innerHTML = `
+        <div><strong>Browser Camera:</strong> ${data.browser_camera_active}</div>
+        <div><strong>Registered People:</strong> ${data.registered_people.join(', ') || 'None'}</div>
+      `;
+
+      const detection = data.last_result
+        ? `${(data.last_result.labels || []).join(', ') || 'unknown'} | matched=${data.last_result.matched} | decision=${data.last_result.decision} | ${data.last_result.details}`
+        : 'No detection yet';
+
+      document.getElementById('detectMeta').innerHTML = `
+        <div><strong>ESP Connected:</strong> ${data.esp_connected}</div>
+        <div><strong>ESP URL:</strong> ${data.esp_url || '-'}</div>
+        <div><strong>ESP Test:</strong> ${data.esp_test_ok}</div>
+        <div><strong>IR State:</strong> ${data.pir_state}</div>
+        <div><strong>Detection Running:</strong> ${data.detection_running}</div>
+        <div><strong>Motion Sequence:</strong> ${data.motion_sequence}</div>
+        <div><strong>Last Motion:</strong> ${data.last_motion_event || '-'}</div>
+        <div><strong>Last Detection:</strong> ${detection}</div>
+      `;
+
+      const attendanceHtml = data.attendance_log.length
+        ? data.attendance_log.map(item => `<div class="ok">${item.timestamp} - ${item.name} (${item.score})</div>`).join('')
+        : 'No attendance yet.';
+      document.getElementById('attendanceList').innerHTML = attendanceHtml;
+      document.getElementById('systemLog').textContent = data.event_log.join('\n');
+
+      if (
+        data.browser_camera_active &&
+        data.detection_running &&
+        data.motion_sequence > lastHandledMotionSequence
+      ) {
+        lastHandledMotionSequence = data.motion_sequence;
+        runMotionBurst(data.motion_sequence);
+      }
+    }
+
+    async function startCamera() {
+      try {
+        if (!mediaStream) {
+          mediaStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+          video.srcObject = mediaStream;
+        }
+        await postJson('/api/browser-camera/start');
+        await fetchStatus();
+      } catch (err) {
+        alert(err.message || 'Camera start failed');
+      }
+    }
+
+    async function stopCamera() {
+      if (detectionTimer) {
+        clearInterval(detectionTimer);
+        detectionTimer = null;
+      }
+      if (mediaStream) {
+        mediaStream.getTracks().forEach(track => track.stop());
+        mediaStream = null;
+        video.srcObject = null;
+      }
+      try {
+        await postJson('/api/browser-camera/stop');
+        await fetchStatus();
+      } catch (err) {
+        alert(err.message || 'Camera stop failed');
+      }
+    }
+
+    async function registerFace() {
+      const label = document.getElementById('personName').value.trim();
+      if (!label) {
+        alert('Enter a name');
+        return;
+      }
+      const image = captureFrame();
+      if (!image) {
+        alert('Start camera first');
+        return;
+      }
+      try {
+        await postJson('/api/register-face', { label, image });
+        await fetchStatus();
+      } catch (err) {
+        alert(err.message || 'Registration failed');
+      }
+    }
+
+    async function connectEsp() {
+      try {
+        await postJson('/api/esp/connect');
+        await fetchStatus();
+      } catch (err) {
+        alert(err.message || 'ESP connection failed');
+      }
+    }
+
+    async function testEsp() {
+      try {
+        await postJson('/api/esp/test');
+        await fetchStatus();
+      } catch (err) {
+        alert(err.message || 'ESP test failed');
+      }
+    }
+
+    async function testHardware(item) {
+      try {
+        await postJson(`/api/esp/hardware-test/${item}`);
+        await fetchStatus();
+      } catch (err) {
+        alert(err.message || 'Hardware test failed');
+      }
+    }
+
+    async function runDetectionFrame() {
+      const image = captureFrame();
+      if (!image) {
+        return;
+      }
+      try {
+        await postJson('/api/detect-frame', { image, motion_sequence: 0, final: false });
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    async function runMotionBurst(sequence) {
+      for (let i = 0; i < 5; i++) {
+        const image = captureFrame();
+        if (!image) {
+          return;
+        }
+        try {
+          await postJson('/api/detect-frame', {
+            image,
+            motion_sequence: sequence,
+            final: i === 4
+          });
+        } catch (err) {
+          console.error(err);
+          break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 300));
+      }
+      await fetchStatus();
+    }
+
+    async function startDetection() {
+      if (!mediaStream) {
+        alert('Start camera first');
+        return;
+      }
+      try {
+        await postJson('/api/detection/start');
+        await fetchStatus();
+      } catch (err) {
+        alert(err.message || 'Detection failed to start');
+      }
+    }
+
+    async function stopDetection() {
+      try {
+        await postJson('/api/detection/stop');
+        await fetchStatus();
+      } catch (err) {
+        alert(err.message || 'Detection stop failed');
+      }
+    }
+
+    fetchStatus();
+    statusTimer = setInterval(fetchStatus, 1000);
+  </script>
+</body>
+</html>
